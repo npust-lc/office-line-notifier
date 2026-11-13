@@ -1,0 +1,47 @@
+# 測試報告：Workers＋D1 版本
+
+測試日期：2026 年 11 月 12 日（台灣）。測試皆在本機開發環境執行，沒有部署正式服務、使用真實 LINE 憑證或發送教師通知。
+
+## 結果
+
+| 檢查 | 結果 |
+| --- | --- |
+| `npm test` | **37 項通過**：27 項 Workers／D1 HTTP 整合、4 項密碼學／事件格式、6 項台灣日期篩選 |
+| `npm run test:e2e` | **10 項通過**：原有 9 項流程及版面，加上正式模式 Cookie／Webhook／輪詢流程 |
+| `npm run build:cloudflare` | 前端與 Workers 型別檢查、Vite、Pages `_worker.js` 打包通過 |
+| Wrangler Worker dry run | 本機打包與 D1 Binding 辨識通過，沒有上傳 |
+| `wrangler pages dev` | 成功啟動 Pages Advanced Mode；`/api/health` 200，首頁 200 且有 CSP 等安全標頭 |
+| D1 Migration | Wrangler 本機成功套用 0001，68 個命令通過 |
+| D1 匯出／隔離還原 | 本機 schema／範本資料匯出後匯入另一個空 D1，73 個命令通過；不是正式資料還原演練 |
+| `npm audit --omit=dev` | 正式前端相依套件 0 項已知漏洞；不代表完整安全稽核 |
+| `git diff --check` | 通過 |
+
+Vite 編譯時 lucide-react 的 `use client` 會產生兩則非阻擋警告；此專案為純客戶端 React，編譯與瀏覽器測試正常。
+
+## 已覆蓋
+
+- 實際 Miniflare／workerd 執行 Workers HTTP 與 SQLite／D1 Migration，未以陣列取代正式資料表。所有 LINE 外部 HTTP 由 Mock 攔截。
+- 密碼 PBKDF2-SHA256 600,000 次及獨立 pepper 已在真實本機 workerd Runtime 驗證。
+- Session Cookie、HttpOnly／SameSite、CSRF、來源驗證、登出、Session 到期、停用、密碼雜湊、登入嘗試限制、無效 Session 拒絕讀取。公開網域拒絕使用本機非 Secure Cookie 設定。
+- 管理員／一般行政後端權限、新增／停用帳號、撤銷 Session、自己及最後管理員降級保護、快照欄位隱私。
+- 12 字元高熵碼、HMAC 正規化、七天期限、到期／已用／重發／停用／解除後失效、同碼併發提交、LINE 身分唯一、每身分及全域猜測限制。
+- 原始簽章、異常 JSON、缺少事件欄位、錯誤時間、超大本文、空 Verify、群組略過、事件與訊息雙重去重。
+- 整包 100 筆訊息及重送；同包先綁定再收到已送出的後續文字；新文字關聯教師並變成待回覆。
+- 撤回、撤回早於原文、其他 LINE 身分偽冒撤回拒絕、解除後舊來源仍可撤回；附件只記類型及 Email 提示，不下載內容。
+- LINE 自動回覆失敗不回滾綁定；重送不重複回覆；單包回覆超過 40 次時保留所有事件並標記略過。
+- 資料庫錯誤回 500、不洩漏 SQL、整包回滾並可用同事件重送。
+- 通知冪等、請求內容指紋、固定重試鍵、未綁教師造成全批回滾、100 人批次建立與前五筆處理、換綁後不繼續 queued 發送、429／5xx／發送中斷狀態。
+- 內部備註與 LINE 分離、交接修改前後版本、恢復、過期版本拒絕、狀態與經辦紀錄。
+- 瀏覽器登入後新增教師、產碼、簽章 Webhook 綁定、文字推播 Mock、老師文字經 D1 與約 15 秒輪詢出現在訊息中心、重新整理維持 Session、新增行政帳號、登出。
+- 原有教師模擬綁定、通知／聊天、領件完成、角色介面、手機無整頁水平溢出、原始 Logo、交接、系統管理兩欄配置與紀錄獨立篩選／5 筆分頁／固定高度／收合。
+
+測試帳號密碼與金鑰皆在每次執行時隨機產生，沒有真實教師資料或正式憑證。測試發現並修正原樣式隱藏「新增教師」按鈕、Vite 代理攔到 `api.ts`、以及 Pages CLI 不接受自訂設定檔路徑的問題；正式設定已改為根目錄 `wrangler.jsonc`。
+
+## 尚未驗證
+
+- 真正 Cloudflare 帳號、D1 ID、Pages／Worker 公開部署、正式 Secrets 與管理員。
+- 真實 LINE Verify、官方帳號身分綁定及回覆、push 額度、封鎖／取消好友、Webhook redelivery、真實附件與撤回事件。
+- 免費方案實際 CPU（包含密碼計算）、流量、讀寫列數、正式多人壓力及網路異常。
+- 正式個資備份、Secrets 保管、遠端 Time Travel 與災難還原。
+
+目前程式碼及本機流程可測試，不等於正式 LINE 已串接完成。遠端設定、發送開關與實際驗收須依 README 取得確認後執行。
