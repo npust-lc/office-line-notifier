@@ -179,3 +179,5 @@ Pages Advanced Mode 已使用 Workers 執行 API，不需要再部署第二個 A
 - 不會把既有 GitHub Pages 改成正式系統，也不會把真實教師資料放進公開展示資料。
 
 官方文件：[Pages Advanced Mode](https://developers.cloudflare.com/pages/functions/advanced-mode/)、[D1 Binding API](https://developers.cloudflare.com/d1/worker-api/d1-database/)、[D1 限制](https://developers.cloudflare.com/d1/platform/limits/)、[LINE Messaging API](https://developers.line.biz/en/docs/messaging-api/)。
+
+<!-- 重新部署以套用 LINE Secrets -->
