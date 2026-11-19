@@ -1,3 +1,5 @@
+import {expectConversationStatus,chooseConversationStatus} from './chat-tools';
+import {openPickups,openNotes,openDemoTools} from './chat-tools';
 import {test,expect,type Page} from '@playwright/test';
 async function chat(page:Page){await page.getByRole('button',{name:/^訊息中心/}).click();await page.locator('.chat-teacher').filter({hasText:'示範教師甲'}).click();}
 
@@ -5,7 +7,7 @@ test('快速通知：搜尋、未綁定禁選、選填位置、返回編輯與�
  await page.goto('/');await page.getByRole('button',{name:'包裹通知',exact:true}).click();const modal=page.getByRole('dialog');
  await expect(modal.getByRole('option').filter({hasText:'示範教師乙'})).toBeDisabled();await page.getByLabel('通知對象',{exact:true}).fill('教務處');await modal.getByRole('option').filter({hasText:'示範教師甲'}).click();
  await page.getByLabel('領取位置（選填）').fill('右側置物架');await page.getByRole('button',{name:'預覽通知'}).click();await expect(modal).toContainText('示範教師甲');await expect(modal.locator('.preview-bubble')).toContainText('領取位置：右側置物架');
- await page.getByRole('button',{name:'返回編輯'}).click();await expect(page.getByLabel('領取位置（選填）')).toHaveValue('右側置物架');await page.getByRole('button',{name:'預覽通知'}).click();await page.getByRole('button',{name:'確認發送給 1 位教師'}).click();await expect(modal).toHaveCount(0);
+ await page.getByRole('button',{name:'返回編輯'}).click();await expect(page.getByLabel('領取位置（選填）')).toHaveValue('右側置物架');await page.getByRole('button',{name:'預覽通知'}).click();await page.getByRole('button',{name:'確認仍需通知'}).click();await expect(modal).toHaveCount(0);
  await page.getByRole('button',{name:'通知紀錄',exact:true}).click();await expect(page.getByRole('row').filter({hasText:'領取位置：右側置物架'})).toContainText('待領取');
 });
 
@@ -16,7 +18,7 @@ test('對話排序與搜尋、未查看提示依登入人員更新，查看不�
   localStorage.setItem('office-line-demo-v1',JSON.stringify({teachers,notifications:[],messages:[{id:'ma',teacher_id:'a',direction:'in',content:'甲先前問題',created_at:older},{id:'mc',teacher_id:'c',direction:'in',content:'丙待回覆',created_at:old},{id:'mb',teacher_id:'b',direction:'out',content:'乙最新已回覆',created_at:now}],staff:[{id:'demo-admin',display_name:'示範管理員',role:'admin',active:true},{id:'demo-staff',display_name:'示範行政人員',role:'staff',active:true}],templates:[],audit_logs:[],conversations:[{teacher_id:'a',status:'待回覆'},{teacher_id:'b',status:'已完成'},{teacher_id:'c',status:'待回覆'}],handovers:[],internal_notes:[],handover_revisions:[]}));
  });
  await page.goto('/');await page.getByRole('button',{name:/^訊息中心/}).click();const rows=page.locator('.chat-teacher');await expect(rows.nth(0)).toContainText('教師丙');await expect(rows.nth(1)).toContainText('教師甲');await expect(rows.nth(2)).toContainText('教師乙');
- await page.getByLabel('搜尋教師對話').fill('總務處');await expect(rows).toHaveCount(1);await expect(page.getByLabel('教師丙有 1 則未查看訊息')).toBeVisible();await rows.click();await expect(page.getByLabel('教師丙有 1 則未查看訊息')).toHaveCount(0);await expect(page.getByLabel('對話處理狀態')).toHaveValue('待回覆');
+ await page.getByLabel('搜尋教師對話').fill('總務處');await expect(rows).toHaveCount(1);await expect(page.getByLabel('教師丙有 1 則未查看訊息')).toBeVisible();await rows.click();await expect(page.getByLabel('教師丙有 1 則未查看訊息')).toHaveCount(0);await expectConversationStatus(page,'待回覆');
  await page.getByRole('button',{name:'切換為行政人員'}).click();await expect(page.getByLabel('教師丙有 1 則未查看訊息')).toHaveCount(0);await page.getByLabel('搜尋教師對話').fill('');await expect(page.getByLabel('教師甲有 1 則未查看訊息')).toBeVisible();
 });
 
@@ -30,8 +32,8 @@ test('其他人正在回覆與逾期清除，輸入提示不包含草稿',async(
 });
 
 test('對話內直接登記領取與快速復原；交接完成也可復原',async({page})=>{
- await page.goto('/');await chat(page);await page.locator('.chat-pickups').getByRole('button',{name:'登記已領取'}).click();await page.getByRole('button',{name:'確認已領取'}).click();await expect(page.locator('.chat-pickups')).toContainText('目前沒有待領取物品');
- await page.locator('.toast').getByRole('button',{name:'復原',exact:true}).click();await expect(page.locator('.chat-pickups')).toContainText('包裹通知');
+ await page.goto('/');await chat(page);await openPickups(page);await page.locator('.chat-pickups').getByRole('button',{name:'登記已領取'}).click();await page.getByRole('button',{name:'確認已領取'}).click();await openPickups(page);await expect(page.locator('.chat-pickups')).toContainText('目前沒有待領取物品');
+ await page.locator('.toast').getByRole('button',{name:'復原',exact:true}).click();await openPickups(page);await expect(page.locator('.chat-pickups')).toContainText('包裹通知');
  await page.getByRole('button',{name:'值班工作台',exact:true}).click();await page.getByRole('button',{name:'新增交接'}).click();await page.getByLabel('交接人',{exact:true}).fill('測試值班人');await page.getByLabel('交接內容').fill('可復原交接');await page.getByRole('button',{name:'儲存交接'}).click();const item=page.locator('.handover-row').filter({hasText:'可復原交接'});await item.getByRole('button',{name:'標記完成'}).click();await page.getByLabel('完成人姓名').fill('測試完成人');await page.getByRole('button',{name:'確認完成',exact:true}).click();await expect(item).toHaveCount(0);await page.locator('.toast').getByRole('button',{name:'復原',exact:true}).click();await expect(item).toBeVisible();await item.getByRole('button',{name:'修改紀錄'}).click();await expect(page.getByRole('dialog')).toContainText('復原完成');
 });
 

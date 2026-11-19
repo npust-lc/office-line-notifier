@@ -84,10 +84,10 @@ tests/                    密碼學、日期、Workers／D1 與瀏覽器測試
 - 包裹、實體信件、行政聯絡、自訂及聊天回覆皆為文字。每批最多 100 位，逐一私訊；每次操作最多處理前 5 筆，其他在紀錄顯示「待發送」可逐筆處理。不是 LINE 群組通知。
 - API 已接受、待發送、傳送中、失敗、結果未明分開記錄；固定請求識別碼及 LINE retry key 防止重複。逾時／5xx 不自動重送；HTTP 成功不代表送達或已讀。
 - 簽章驗證通過才處理 Webhook；事件 ID 與 LINE 訊息 ID 去重；支援訊息撤回及先撤回後收到原訊息；原身分解除後仍可撤回其舊訊息。
-- 已綁教師的新文字存入 D1，對話標記待回覆。訊息中心每 15 秒輪詢；隱藏分頁暫停，失敗退避至 60 秒。資料未變時以 ETag 回 304。
+- 已綁教師的新文字存入 D1，對話標記待回覆。訊息中心約每 3 秒輕量檢查，其他頁面約 10 秒，閒置約 30 秒；隱藏分頁暫停，失敗退避至 60 秒。資料未變時以 ETag 回 304，詳見 [整合更新說明](docs/CONVERSATION-UPDATE.md)。
 - 圖片、檔案、語音等只記錄不支援的類型和 Email 提示；不下載附件、不儲存檔名或內容、不建立下載連結。介面沒有附件上傳操作。
 - 交接人及完成人可手動填寫，實際操作帳號另行記錄；更正、恢復及版本衝突保護仍保留。內部備註不呼叫 LINE。
-- 最近操作／交接紀錄保留獨立日期篩選、每頁 5 筆、固定高度與收合。
+- 系統管理分為一般設定、操作紀錄、資料維護，主要卡片直接顯示。最近操作／交接紀錄保留獨立日期篩選、每頁 5 筆與固定高度捲動；備份與清理在資料維護分類。
 
 ## 4. 自動化測試與編譯
 
@@ -179,5 +179,3 @@ Pages Advanced Mode 已使用 Workers 執行 API，不需要再部署第二個 A
 - 不會把既有 GitHub Pages 改成正式系統，也不會把真實教師資料放進公開展示資料。
 
 官方文件：[Pages Advanced Mode](https://developers.cloudflare.com/pages/functions/advanced-mode/)、[D1 Binding API](https://developers.cloudflare.com/d1/worker-api/d1-database/)、[D1 限制](https://developers.cloudflare.com/d1/platform/limits/)、[LINE Messaging API](https://developers.line.biz/en/docs/messaging-api/)。
-
-<!-- 重新部署以套用 LINE Secrets -->

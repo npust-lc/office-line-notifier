@@ -3,13 +3,22 @@ import{generateCode,hashCode,sha256,passwordHash}from'./security';
 import{limit}from'./auth';
 import{dispatch,type ReplyCompletion}from'./line';
 import{workflowCommand,saveUndo,undoInfo}from'./workflow';
+import {isPickup} from '../src/notice';
+import {resolveBindingLink} from './binding-link';
+import {pickupCommand} from './pickups';
 import{APP_VERSION}from'../src/version';
+import {recordCleanup} from './record-cleanup';
+import {recordBackup} from './record-backup';
 export async function command(env:Env,actor:Actor,action:string,p:any){
  const db=env.DB,now=iso();
+ const backup=await recordBackup(env,actor,action,p);if(backup!==undefined)return backup;
+ const cleanup=await recordCleanup(env,actor,action,p);if(cleanup!==undefined)return cleanup;
+ const pickup=await pickupCommand(env,actor,action,p);if(pickup!==undefined)return pickup;
  const result=await workflowCommand(env,actor,action,p);if(result!==undefined)return result;
  if(['teacher_save','issue_code','unbind','staff_save','template_save','system_status'].includes(action))admin(actor);
  if(action==='system_status')return {version:APP_VERSION,public_origin:env.ALLOWED_ORIGIN,send_enabled:env.LINE_SEND_ENABLED==='true',line_configured:!!env.LINE_CHANNEL_ACCESS_TOKEN&&!!env.LINE_CHANNEL_SECRET,binding_configured:env.BINDING_PEPPER?.length>=32};
  if(action==='teacher_save'){
+  if(p.active!=null&&typeof p.active!=='boolean')throw new HttpError(400,'啟用狀態格式錯誤');
   const tid=p.teacher_id?id(p.teacher_id):crypto.randomUUID();const name=text(p.name,'教師姓名',80),dept=text(p.department??'','單位',500,0),notes=text(p.notes??'','備註',500,0);
   const statements=[db.prepare(`INSERT INTO teachers(id,name,department,notes,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,department=excluded.department,notes=excluded.notes,active=excluded.active,updated_at=excluded.updated_at`).bind(tid,name,dept,notes,p.active===false?0:1,now,now),audit(db,actor.id,action,tid)];
   // 停用時撤銷未使用綁定碼，避免重新啟用後舊碼意外復活。
@@ -20,12 +29,13 @@ export async function command(env:Env,actor:Actor,action:string,p:any){
   if(!env.BINDING_PEPPER||env.BINDING_PEPPER.length<32)throw new HttpError(503,'後端尚未設定綁定金鑰');
   const tid=id(p.teacher_id),code=generateCode(),expiry=unix()+604800,digest=await hashCode(code,env.BINDING_PEPPER);
   const result=await db.batch([db.prepare(`INSERT INTO binding_codes(teacher_id,code_hash,expires_at,used_at,issued_at,issued_by) SELECT id,?,?,NULL,?,? FROM teachers WHERE id=? AND active=1 AND line_user_id IS NULL ON CONFLICT(teacher_id) DO UPDATE SET code_hash=excluded.code_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at,issued_by=excluded.issued_by RETURNING teacher_id`).bind(digest,expiry,now,actor.id,tid),db.prepare("INSERT INTO audit_logs(id,actor_id,action,teacher_id,created_at) SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM binding_codes WHERE teacher_id=? AND code_hash=?)").bind(crypto.randomUUID(),actor.id,action,tid,now,tid,digest)]);
-  if(!result[0].results.length)throw new HttpError(409,'教師已綁定、停用或不存在');return {code,expires_at:new Date(expiry*1000).toISOString()};
+  if(!result[0].results.length)throw new HttpError(409,'教師已綁定、停用或不存在');return {code,binding_link:await resolveBindingLink(env,code),expires_at:new Date(expiry*1000).toISOString()};
  }
  if(action==='unbind'){
   const tid=id(p.teacher_id);await db.batch([db.prepare('UPDATE teachers SET line_user_id=NULL,bound_at=NULL,bound_event_id=NULL,binding_event_time=NULL,binding_version=binding_version+1,updated_at=? WHERE id=?').bind(now,tid),db.prepare('DELETE FROM binding_codes WHERE teacher_id=?').bind(tid),db.prepare("UPDATE notifications SET send_status='failed',error_code='binding_changed' WHERE teacher_id=? AND send_status='queued'").bind(tid),audit(db,actor.id,action,tid)]);return {};
  }
  if(action==='staff_save'){
+  if(p.active!=null&&typeof p.active!=='boolean')throw new HttpError(400,'啟用狀態格式錯誤');
   const sid=p.id?id(p.id):crypto.randomUUID(),role=p.role;if(!['admin','staff'].includes(role))throw new HttpError(400,'權限格式錯誤');
   const name=text(p.display_name,'顯示名稱',80),old=await db.prepare('SELECT * FROM admins WHERE id=?').bind(sid).first<any>();
   if(actor.id===sid&&(p.active===false||role!=='admin'))throw new HttpError(409,'不可停用或降級自己的帳號');
@@ -48,11 +58,14 @@ export async function command(env:Env,actor:Actor,action:string,p:any){
  if(action.startsWith('handover_'))return handover(env,actor,action,p);
  if(action==='conversation_status'){
   if(!['待回覆','已完成'].includes(p.status))throw new HttpError(400,'對話狀態錯誤');
-  const tid=id(p.teacher_id);await db.batch([db.prepare('INSERT INTO conversations(teacher_id,status,updated_at) VALUES(?,?,?) ON CONFLICT(teacher_id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at').bind(tid,p.status,now),audit(db,actor.id,action,tid)]);return {};
+  const tid=id(p.teacher_id);if(!await db.prepare('SELECT id FROM teachers WHERE id=?').bind(tid).first())throw new HttpError(404,'找不到教師');await db.batch([db.prepare('INSERT INTO conversations(teacher_id,status,updated_at) VALUES(?,?,?) ON CONFLICT(teacher_id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at').bind(tid,p.status,now),audit(db,actor.id,action,tid)]);return {};
  }
  if(action==='send'){
   if(env.LINE_SEND_ENABLED!=='true'||!env.LINE_CHANNEL_ACCESS_TOKEN)throw new HttpError(409,'真實發送尚未啟用，請先完成測試與核准');
-  const content=text(p.content,'訊息'),kind=p.kind,request=id(p.request_id);
+  const content=text(p.content,'訊息'),requestedKind=p.kind,kind=requestedKind==='pickup'?'custom':requestedKind,request=id(p.request_id);
+  const pickupName=requestedKind==='pickup'?text(p.pickup_name,'物品名稱',80):null;
+  if(requestedKind!=='pickup'&&p.pickup_name!=null)throw new HttpError(400,'請使用其他待領物品類型');
+  const pickup=isPickup({kind,pickup_name:pickupName});
   if(!['mail','parcel','contact','custom','reply'].includes(kind)||!Array.isArray(p.teacher_ids)||p.teacher_ids.length<1||p.teacher_ids.length>100)throw new HttpError(400,'通知類型或對象錯誤，每批 1 至 100 位');
   const ids=[...new Set<string>(p.teacher_ids.map(id))].sort();
   let reply:ReplyCompletion|undefined;
@@ -64,20 +77,22 @@ export async function command(env:Env,actor:Actor,action:string,p:any){
     reply={complete:p.complete_conversation!==false,lastInboundId:p.last_inbound_id===null?null:id(p.last_inbound_id)};
    }
   }
-  const fingerprint=await sha256(JSON.stringify({ids,content,kind,...(reply?{reply}:{})}));
+  if(p.duplicate_confirmed!=null&&typeof p.duplicate_confirmed!=='boolean')throw new HttpError(400,'重複通知確認格式錯誤');
+  const fingerprint=await sha256(JSON.stringify({ids,content,kind,...(pickupName?{pickup_name:pickupName}:{}),...(reply?{reply}:{}),...(p.duplicate_confirmed?{duplicate_confirmed:true}:{})}));
   const existing=await db.prepare('SELECT * FROM send_requests WHERE id=?').bind(request).first<any>();
+  if(existing?.archived_at)throw new HttpError(409,'此發送請求的舊紀錄已清理，不能再次發送','RECORDS_CLEANED');
   if(existing&&(existing.fingerprint!==fingerprint||existing.actor_id!==actor.id))throw new HttpError(409,'重複請求內容不一致');
   await limit(env,'send:'+actor.id,30,60);
   const items=ids.map(tid=>({id:crypto.randomUUID(),teacher_id:tid,retry_key:crypto.randomUUID()}));
   // 單一 JSON 參數批次建立，維持 100 位上限並避免超過免費方案每次 D1 查詢／參數上限。
-  const statements=[db.prepare('INSERT INTO send_requests(id,actor_id,fingerprint,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING').bind(request,actor.id,fingerprint,now),
-   db.prepare(`INSERT INTO notifications(id,request_id,teacher_id,kind,content,sender_id,binding_version,retry_key,status,created_at)
-   SELECT json_extract(j.value,'$.id'),?,json_extract(j.value,'$.teacher_id'),?,?,?,coalesce(t.binding_version,-1),json_extract(j.value,'$.retry_key'),?,?
+  const statements=[db.prepare(`INSERT INTO send_requests(id,actor_id,fingerprint,created_at) SELECT ?,?,?,? WHERE ?=1 OR NOT EXISTS(SELECT 1 FROM notifications WHERE teacher_id IN(SELECT value FROM json_each(?)) AND (kind IN ('mail','parcel') OR pickup_name IS NOT NULL) AND status='待領取') ON CONFLICT(id) DO NOTHING`).bind(request,actor.id,fingerprint,now,!pickup||p.duplicate_confirmed===true?1:0,JSON.stringify(ids)),
+   db.prepare(`INSERT INTO notifications(id,request_id,teacher_id,kind,content,sender_id,binding_version,retry_key,status,created_at,pickup_name)
+   SELECT json_extract(j.value,'$.id'),?,json_extract(j.value,'$.teacher_id'),?,?,?,coalesce(t.binding_version,-1),json_extract(j.value,'$.retry_key'),?,?,?
    FROM json_each(?) j LEFT JOIN teachers t ON t.id=json_extract(j.value,'$.teacher_id')
    WHERE NOT EXISTS(SELECT 1 FROM notifications WHERE request_id=? AND teacher_id=json_extract(j.value,'$.teacher_id'))
-   AND EXISTS(SELECT 1 FROM send_requests WHERE id=? AND actor_id=? AND fingerprint=?)`).bind(request,kind,content,actor.id,['mail','parcel'].includes(kind)?'待領取':'待回覆',now,JSON.stringify(items),request,request,actor.id,fingerprint)];
+   AND EXISTS(SELECT 1 FROM send_requests WHERE id=? AND actor_id=? AND fingerprint=? AND archived_at IS NULL)`).bind(request,kind,content,actor.id,pickup?'待領取':'待回覆',now,pickupName,JSON.stringify(items),request,request,actor.id,fingerprint)];
   await db.batch(statements);
-  const req=await db.prepare('SELECT * FROM send_requests WHERE id=?').bind(request).first<any>();if(req.fingerprint!==fingerprint||req.actor_id!==actor.id)throw new HttpError(409,'重複請求內容不一致');
+  const req=await db.prepare('SELECT * FROM send_requests WHERE id=?').bind(request).first<any>();if(!req)throw new HttpError(409,'教師已有待領取紀錄，請確認是否為新件或仍需再次通知','DUPLICATE_NOTICE');if(req.archived_at)throw new HttpError(409,'此發送請求的舊紀錄已清理，不能再次發送','RECORDS_CLEANED');if(req.fingerprint!==fingerprint||req.actor_id!==actor.id)throw new HttpError(409,'重複請求內容不一致');
   const notices=await rows<{id:string}>(db.prepare('SELECT id FROM notifications WHERE request_id=? ORDER BY teacher_id').bind(request));
   for(const n of notices.slice(0,5))await dispatch(env,actor,n.id,reply);
   const results=await rows(db.prepare('SELECT id,send_status,error_code FROM notifications WHERE request_id=? ORDER BY teacher_id').bind(request));

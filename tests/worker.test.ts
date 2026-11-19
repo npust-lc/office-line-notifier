@@ -12,12 +12,13 @@ let mf:Miniflare,db:D1Database;
 const origin='http://localhost:5173',authPepper=randomBytes(32).toString('hex'),bindingPepper=randomBytes(32).toString('hex'),lineSecret=randomBytes(32).toString('hex');
 const credentials={username:'test-'+randomUUID(),password:randomBytes(24).toString('hex')};
 let cookie='',csrf='',staffCookie='',staffCsrf='',timeOffset=0;
-let calls:{url:string;body:any;retry:string|null}[]=[],lineStatus=200,lineThrows=false;
+let calls:{url:string;body:any;retry:string|null}[]=[],lineStatus=200,lineThrows=false,botStatus=200;
 let duringPush:(()=>Promise<void>)|undefined;
 const now=()=>new Date(Date.now()+timeOffset).toISOString();
 beforeAll(async()=>{
  const output=await build({entryPoints:['worker/index.ts'],bundle:true,format:'esm',platform:'browser',write:false});
  mf=new Miniflare({modules:true,script:productionCryptoLimit+output.outputFiles[0].text,compatibilityDate:'2026-07-01',d1Databases:['DB'],bindings:{ALLOWED_ORIGIN:origin,COOKIE_SECURE:'false',AUTH_PEPPER:authPepper,BINDING_PEPPER:bindingPepper,LINE_CHANNEL_SECRET:lineSecret,LINE_CHANNEL_ACCESS_TOKEN:randomBytes(32).toString('hex'),LINE_SEND_ENABLED:'true'},outboundService:async(req:any)=>{
+  if(req.url.endsWith('/v2/bot/info'))return new Response(JSON.stringify({basicId:'@office-test'}),{status:botStatus});
   calls.push({url:req.url,body:await req.json(),retry:req.headers.get('x-line-retry-key')});if(lineThrows)throw Error('simulated transport failure');if(req.url.endsWith('/message/push'))await duringPush?.();return new Response('{}',{status:lineStatus});
  }});
  db=await mf.getD1Database('DB') as unknown as D1Database;
@@ -26,8 +27,8 @@ beforeAll(async()=>{
 },60000);
 afterAll(async()=>{await mf?.dispose();});
 beforeEach(async()=>{
- calls=[];lineStatus=200;lineThrows=false;timeOffset=0;duringPush=undefined;
- for(const name of ['undo_actions','reply_presence','conversation_views','handover_revisions','audit_logs','internal_notes','handovers','messages','conversations','notifications','send_requests','unsend_tombstones','webhook_events','binding_codes','teachers','sessions','rate_limits','admins'])await db.prepare(`DELETE FROM ${name}`).run();
+ calls=[];lineStatus=200;lineThrows=false;botStatus=200;timeOffset=0;duringPush=undefined;
+ for(const name of ['record_cleanup_jobs','undo_actions','reply_presence','conversation_views','handover_revisions','audit_logs','internal_notes','handovers','messages','conversations','notifications','send_requests','unsend_tombstones','webhook_events','binding_codes','teachers','sessions','rate_limits','admins'])await db.prepare(`DELETE FROM ${name}`).run();
  const hash=await passwordHash(credentials.password,authPepper);
  await db.prepare('INSERT INTO admins VALUES(?,?,?,?,?,?,?,?)').bind('test-admin',credentials.username,'測試管理員',hash,'admin',1,now(),now()).run();
  await db.prepare('INSERT INTO admins VALUES(?,?,?,?,?,?,?,?)').bind('test-staff',credentials.username+'-staff','測試行政人員',hash,'staff',1,now(),now()).run();
@@ -42,6 +43,123 @@ async function issue(tid:string){const r=await cmd('issue_code',{teacher_id:tid}
 function ev(text:string,uid='U'+randomUUID(),eventId=randomUUID(),messageId=randomUUID()){return {webhookEventId:eventId,type:'message',timestamp:Date.now(),source:{type:'user',userId:uid},message:{id:messageId,type:'text',text},replyToken:randomBytes(16).toString('hex')};}
 async function hook(events:any[],raw?:string,sig?:string){const body=raw??JSON.stringify({events});return mf.dispatchFetch('http://localhost/api/line/webhook',{method:'POST',headers:{'x-line-signature':sig??createHmac('sha256',lineSecret).update(body).digest('base64')},body});}
 async function get<T=any>(sql:string,...args:any[]){return db.prepare(sql).bind(...args).first<T>();}
+const cleanupInput={before:'2026-01-01',contact:true,handovers:true,audits:true};
+async function backupStart(){const r=await cmd('records_backup_start');expect(r.status).toBe(200);return await r.json() as any;}
+it('備份所有 API 需要登入、CSRF、正確來源及管理員，不能靠隱藏按鈕授權',async()=>{
+ for(const action of ['records_backup_start','records_backup_page','records_backup_finish']){
+  expect((await cmd(action,{},'','')).status).toBe(401);expect((await cmd(action,{},cookie,'wrong')).status).toBe(403);expect((await cmd(action,{},staffCookie,staffCsrf)).status).toBe(403);
+  expect((await request('/command',{action,payload:{}},cookie,csrf,{Origin:'https://untrusted.example'})).status).toBe(403);
+ }
+});
+it('備份讀取完整超過 500 筆歷史且只回傳白名單欄位，不匯出憑證或 LINE 身分',async()=>{
+ const tid=await teacher(true),lineId=(await get('SELECT line_user_id FROM teachers WHERE id=?',tid)).line_user_id;
+ await db.prepare(`WITH RECURSIVE seq(n) AS(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<530) INSERT INTO messages(id,teacher_id,direction,content,created_at) SELECT 'backup-msg-'||n,?,'in','虛構完整歷史備份',? FROM seq`).bind(tid,now()).run();
+ const start=await backupStart();expect(start.counts.messages).toBe(530);const collected:any[]=[];let cursor=null;
+ do{const r=await cmd('records_backup_page',{token:start.token,table:'messages',cursor:cursor??''});expect(r.status).toBe(200);const page:any=await r.json();collected.push(...page.rows);cursor=page.next_cursor;}while(cursor);
+ expect(collected).toHaveLength(530);expect(new Set(collected.map(r=>r.id)).size).toBe(530);expect(collected[0].sequence).toBeTypeOf('number');
+ let text='';for(const table of ['staff','teachers','notifications']){const r=await cmd('records_backup_page',{token:start.token,table});expect(r.status).toBe(200);text+=JSON.stringify(await r.json());}
+ for(const sensitive of ['password_hash','csrf_token','line_user_id','code_hash','retry_key',credentials.password,authPepper,lineId])expect(text).not.toContain(sensitive);
+});
+it('備份識別防竄改與跨管理員使用，拒絕任意資料表、游標及過期識別',async()=>{
+ const start=await backupStart(),token=start.token as string,other='backup-admin-'+randomUUID();
+ expect((await cmd('records_backup_page',{token:token.slice(0,-1)+(token.endsWith('a')?'b':'a'),table:'teachers'})).status).toBe(403);
+ expect((await cmd('records_backup_page',{token,table:'sessions'})).status).toBe(400);expect((await cmd('records_backup_page',{token,table:'teachers',cursor:"' OR 1=1 --"})).status).toBe(400);
+ const hash=(await get('SELECT password_hash FROM admins WHERE id=?','test-admin')).password_hash;await db.prepare("INSERT INTO admins VALUES(?,?,?,?,'admin',1,?,?)").bind(other,other,'另一位虛構管理員',hash,now(),now()).run();const logged=await login(other);
+ expect((await cmd('records_backup_page',{token,table:'teachers'},logged.cookie,logged.csrf)).status).toBe(403);
+ const value=JSON.parse(atob(token.split('.')[0]));value.expires_at=0;const payload=btoa(JSON.stringify(value)),sig=createHmac('sha256',authPepper).update('office-record-backup-v1:'+payload).digest('hex');
+ expect((await cmd('records_backup_page',{token:payload+'.'+sig,table:'teachers'})).status).toBe(409);
+});
+it('備份版本排除查看與輸入提示，但正文更新時拒絕混合版本，完成只記一筆摘要',async()=>{
+ const tid=await teacher(true),mid=randomUUID();await db.prepare("INSERT INTO messages(id,teacher_id,direction,content,created_at) VALUES(?,?,'in','備份測試',?)").bind(mid,tid,now()).run();const start=await backupStart();
+ await cmd('conversation_view',{teacher_id:tid,message_id:mid});await cmd('presence',{teacher_id:tid,client_id:randomUUID(),typing:true});
+ expect((await cmd('records_backup_page',{token:start.token,table:'messages'})).status).toBe(200);
+ const body={token:start.token,sha256:randomBytes(32).toString('hex'),bytes:100};expect((await cmd('records_backup_finish',body)).status).toBe(200);expect((await cmd('records_backup_finish',body)).status).toBe(200);
+ expect((await get("SELECT count(*) AS n FROM audit_logs WHERE action='records_backup'")).n).toBe(1);expect((await cmd('records_backup_finish',{...body,sha256:randomBytes(32).toString('hex')})).status).toBe(409);
+ const next=await backupStart();await db.prepare('UPDATE messages SET content=? WHERE id=?').bind('已變更的文字',mid).run();const response=await cmd('records_backup_page',{token:next.token,table:'messages'});expect(response.status).toBe(409);expect((await response.json() as any).code).toBe('BACKUP_CHANGED');expect((await cmd('records_backup_finish',{...body,token:next.token})).status).toBe(409);
+});
+it('成功登入會重設帳號失敗計數，含連字號的不同帳號不共用限流桶',async()=>{
+ for(let i=0;i<6;i++)expect((await request('/login',credentials,'','')).status).toBe(200);
+ const hash=(await get('SELECT password_hash FROM admins WHERE id=?','test-admin')).password_hash;
+ for(const name of ['backup-account','backupaccount'])await db.prepare("INSERT INTO admins VALUES(?,?,?,?,'staff',1,?,?)").bind(name,name,'虛構獨立帳號',hash,now(),now()).run();
+ for(let i=0;i<5;i++)expect((await request('/login',{username:'backup-account',password:randomUUID()},'','')).status).toBe(401);
+ expect((await request('/login',{username:'backup-account',password:credentials.password},'','')).status).toBe(429);expect((await request('/login',{username:'backupaccount',password:credentials.password},'','')).status).toBe(200);
+});
+it('教師與帳號啟用狀態拒絕字串偽裝，不存在的對話回 404',async()=>{
+ expect((await cmd('teacher_save',{name:'虛構教師',active:'false'})).status).toBe(400);expect((await cmd('staff_save',{active:'false'})).status).toBe(400);expect((await cmd('conversation_status',{teacher_id:randomUUID(),status:'已完成'})).status).toBe(404);
+});
+it('同一毫秒聊天依實際序號排序，不受 UUID 字母順序影響',async()=>{
+ const tid=await teacher(true),when=now();for(const id of ['z-first-message','a-second-message'])await db.prepare("INSERT INTO messages(id,teacher_id,direction,content,created_at) VALUES(?,?,'in',?,?)").bind(id,tid,id,when).run();
+ const conversation:any=await(await request('/conversation?teacher_id='+tid)).json(),data:any=await(await request('/data')).json();expect(conversation.messages.map((m:any)=>m.id)).toEqual(['z-first-message','a-second-message']);expect(data.messages.map((m:any)=>m.id)).toEqual(['z-first-message','a-second-message']);
+});
+it('清理預覽後正文撤回，即使對話仍已完成，也拒絕刪除舊快照',async()=>{
+ const f=await cleanupFixture(),plan=await cleanupPreview(),m=await get('SELECT id FROM messages WHERE teacher_id=? ORDER BY rowid LIMIT 1',f.tid);await db.prepare("UPDATE messages SET content='（訊息已撤回）',withdrawn=1 WHERE id=?").bind(m.id).run();
+ const r=await cmd('records_cleanup_execute',{job_id:plan.job_id,confirmation:'刪除紀錄'});expect(r.status).toBe(409);expect((await r.json() as any).code).toBe('CLEANUP_CHANGED');expect((await get('SELECT count(*) AS n FROM messages')).n).toBe(2);
+});
+async function cleanupFixture(){
+ const tid=await teacher(true),requests=[randomUUID(),randomUUID()];
+ for(const request_id of requests)expect((await cmd('send',{request_id,teacher_ids:[tid],kind:'reply',content:'虛構歷史聯絡',last_inbound_id:null})).status).toBe(200);
+ const old='2024-01-01T00:00:00.000Z';
+ await db.prepare('UPDATE notifications SET created_at=?,completed_at=?,sent_at=? WHERE teacher_id=?').bind(old,old,old,tid).run();
+ await db.prepare('UPDATE messages SET created_at=? WHERE teacher_id=?').bind(old,tid).run();
+ const hid=randomUUID();await cmd('handover_create',{id:hid,content:'虛構已完成交接',handover_name:'虛構交接人'});await cmd('handover_complete',{id:hid,expected_version:1,finisher_name:'虛構完成人'});
+ await db.prepare('UPDATE handovers SET created_at=?,completed_at=? WHERE id=?').bind(old,old,hid).run();await db.prepare('UPDATE undo_actions SET expires_at=0').run();
+ await db.prepare("INSERT INTO audit_logs(id,actor_id,action,created_at) VALUES(?,'test-admin','login',?)").bind(randomUUID(),old).run();
+ return {tid,hid,requests};
+}
+async function cleanupPreview(p=cleanupInput){const response=await cmd('records_cleanup_preview',p);expect(response.status).toBe(200);return await response.json() as any;}
+it('清理預覽與執行均要求登入、來源、CSRF 及後端管理員權限',async()=>{
+ for(const action of ['records_cleanup_preview','records_cleanup_execute']){
+  expect((await cmd(action,cleanupInput,'','')).status).toBe(401);expect((await cmd(action,cleanupInput,cookie,'wrong')).status).toBe(403);expect((await cmd(action,cleanupInput,staffCookie,staffCsrf)).status).toBe(403);
+  expect((await request('/command',{action,payload:cleanupInput},cookie,csrf,{Origin:'https://untrusted.example'})).status).toBe(403);
+ }
+ expect((await get('SELECT count(*) AS n FROM record_cleanup_jobs')).n).toBe(0);
+});
+it('清理日期與範圍須驗證，預覽不刪資料，錯誤確認文字不能執行',async()=>{
+ await cleanupFixture();
+ for(const p of [{...cleanupInput,before:'2026-02-30'},{...cleanupInput,before:'2099-01-01'},{...cleanupInput,before:"' OR 1=1 --"},{...cleanupInput,contact:'true'},{...cleanupInput,contact:false,handovers:false,audits:false}])expect((await cmd('records_cleanup_preview',p)).status).toBe(400);
+ const p=await cleanupPreview();expect(p.counts).toEqual({messages:1,notifications:1,handovers:1,revisions:2,audits:1});expect((await get('SELECT count(*) AS n FROM notifications')).n).toBe(2);
+ expect(JSON.stringify(p)).not.toContain('虛構');expect((await cmd('records_cleanup_execute',{job_id:p.job_id,confirmation:'刪除'})).status).toBe(400);expect((await get('SELECT count(*) AS n FROM messages')).n).toBe(2);
+});
+it('清理原子刪除關聯資料，保留最新訊息、身分及清理稽核，重送不再刪除或發送',async()=>{
+ const f=await cleanupFixture(),latest=await get('SELECT id,rowid FROM messages ORDER BY rowid DESC LIMIT 1'),p=await cleanupPreview(),payload={job_id:p.job_id,confirmation:'刪除紀錄'},before=calls.length;
+ const results=await Promise.all([cmd('records_cleanup_execute',payload),cmd('records_cleanup_execute',payload)]);expect(results.every(r=>r.status===200)).toBe(true);
+ expect((await get('SELECT count(*) AS n FROM messages')).n).toBe(1);expect((await get('SELECT id FROM messages')).id).toBe(latest.id);expect((await get('SELECT count(*) AS n FROM notifications')).n).toBe(1);
+ expect((await get('SELECT count(*) AS n FROM handovers')).n).toBe(0);expect((await get('SELECT count(*) AS n FROM handover_revisions')).n).toBe(0);expect((await get('SELECT count(*) AS n FROM audit_logs WHERE handover_id IS NOT NULL')).n).toBe(0);
+ const log=await get("SELECT * FROM audit_logs WHERE action='records_cleanup'");expect(log.actor_id).toBe('test-admin');expect(JSON.parse(log.details).counts).toEqual(p.counts);expect((await get("SELECT count(*) AS n FROM audit_logs WHERE action='records_cleanup'")).n).toBe(1);
+ expect((await get('SELECT plan_json,state FROM record_cleanup_jobs WHERE id=?',p.job_id)).plan_json).toBeNull();expect((await get('SELECT line_user_id FROM teachers WHERE id=?',f.tid)).line_user_id).toBeTruthy();
+ expect((await cmd('send',{request_id:f.requests[0],teacher_ids:[f.tid],kind:'reply',content:'虛構歷史聯絡',last_inbound_id:null})).status).toBe(409);expect(calls).toHaveLength(before);
+ const again:any=await(await cmd('records_cleanup_execute',payload)).json();expect(again.already_applied).toBe(true);expect((await get('SELECT count(*) AS n FROM notifications')).n).toBe(1);
+});
+it('預覽後交接恢復待處理，整批拒絕刪除；不同管理員與逾時預覽不能使用',async()=>{
+ const f=await cleanupFixture(),p=await cleanupPreview();await cmd('handover_reopen',{id:f.hid,expected_version:2});
+ const r=await cmd('records_cleanup_execute',{job_id:p.job_id,confirmation:'刪除紀錄'});expect(r.status).toBe(409);expect((await r.json() as any).code).toBe('CLEANUP_CHANGED');expect((await get('SELECT count(*) AS n FROM messages')).n).toBe(2);
+ await db.prepare("UPDATE record_cleanup_jobs SET actor_id='test-staff' WHERE id=?").bind(p.job_id).run();expect((await cmd('records_cleanup_execute',{job_id:p.job_id,confirmation:'刪除紀錄'})).status).toBe(404);
+ const next=await cleanupPreview();await db.prepare('UPDATE record_cleanup_jobs SET expires_at=0 WHERE id=?').bind(next.job_id).run();expect((await cmd('records_cleanup_execute',{job_id:next.job_id,confirmation:'刪除紀錄'})).status).toBe(409);
+});
+it('預覽後老師新訊息抵達，整批拒絕；未完成、傳送中與可復原紀錄均保留',async()=>{
+ const f=await cleanupFixture(),p=await cleanupPreview(),t=await get('SELECT line_user_id FROM teachers WHERE id=?',f.tid);await hook([ev('預覽期間的新訊息',t.line_user_id)]);
+ expect((await cmd('records_cleanup_execute',{job_id:p.job_id,confirmation:'刪除紀錄'})).status).toBe(409);expect((await get('SELECT count(*) AS n FROM notifications')).n).toBe(2);
+ await db.prepare("UPDATE notifications SET status='待領取',send_status='uncertain' WHERE request_id=?").bind(f.requests[0]).run();
+ await db.prepare('UPDATE undo_actions SET expires_at=?').bind(Math.floor(Date.now()/1000)+60).run();const next=await cleanupPreview();expect(next.counts.messages).toBe(0);expect(next.counts.notifications).toBe(0);expect(next.counts.handovers).toBe(0);
+});
+it('清理發生 SQL 失敗時整批回滾，通知、訊息及防重送帳本不部分更動',async()=>{
+ await cleanupFixture();const p=await cleanupPreview();await db.prepare("CREATE TRIGGER test_cleanup_abort BEFORE DELETE ON handovers BEGIN SELECT RAISE(ABORT,'test_cleanup_failure'); END").run();
+ try{expect((await cmd('records_cleanup_execute',{job_id:p.job_id,confirmation:'刪除紀錄'})).status).toBe(500);expect((await get('SELECT count(*) AS n FROM messages')).n).toBe(2);expect((await get('SELECT count(*) AS n FROM send_requests WHERE archived_at IS NOT NULL')).n).toBe(0);expect((await get('SELECT state FROM record_cleanup_jobs WHERE id=?',p.job_id)).state).toBe('preview');expect((await get("SELECT count(*) AS n FROM audit_logs WHERE action='records_cleanup'")).n).toBe(0);}finally{await db.prepare('DROP TRIGGER test_cleanup_abort').run();}
+});
+it('聊天清理有分批上限，保留最後訊息與 Webhook 去重，未查看序號不倒退',async()=>{
+ const tid=await teacher(true),t=await get('SELECT line_user_id FROM teachers WHERE id=?',tid),first=ev('虛構舊訊息',t.line_user_id),last=ev('保留的最後訊息',t.line_user_id);
+ await hook([first]);await db.prepare(`WITH RECURSIVE seq(n) AS(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<349) INSERT INTO messages(id,teacher_id,direction,content,created_at) SELECT 'cleanup-msg-'||n,?,'in','舊聊天','2024-01-01T00:00:00.000Z' FROM seq`).bind(tid).run();await hook([last]);await cmd('conversation_status',{teacher_id:tid,status:'已完成'});await db.prepare("UPDATE messages SET created_at='2024-01-01T00:00:00.000Z'").run();
+ const latest=await get('SELECT id,rowid FROM messages ORDER BY rowid DESC LIMIT 1');await cmd('conversation_view',{teacher_id:tid,message_id:latest.id});
+ const p=await cleanupPreview();expect(p.counts.messages).toBe(300);expect(p.limited).toBe(true);expect((await cmd('records_cleanup_execute',{job_id:p.job_id,confirmation:'刪除紀錄'})).status).toBe(200);
+ const next=await cleanupPreview();expect(next.counts.messages).toBe(50);await cmd('records_cleanup_execute',{job_id:next.job_id,confirmation:'刪除紀錄'});expect((await get('SELECT count(*) AS n FROM messages')).n).toBe(1);
+ await hook([first]);expect((await get('SELECT count(*) AS n FROM messages')).n).toBe(1);await hook([ev('新的回覆',t.line_user_id)]);expect((await get('SELECT max(rowid) AS seq FROM messages')).seq).toBeGreaterThan(latest.rowid);
+ const data:any=await(await request('/data')).json();expect(data.inbox.find((i:any)=>i.teacher_id===tid).unread_count).toBe(1);
+});
+it('以台灣日期界線清理，保留較新紀錄及歷次清理摘要',async()=>{
+ const tid=await teacher(true);for(const [key,at]of [['before','2025-12-31T15:59:59.999Z'],['at','2025-12-31T16:00:00.000Z']])await db.prepare("INSERT INTO audit_logs(id,actor_id,action,created_at) VALUES(?,'test-admin','login',?)").bind(key,at).run();
+ await db.prepare("INSERT INTO audit_logs(id,actor_id,action,created_at) VALUES('old-cleanup','test-admin','records_cleanup','2024-01-01T00:00:00.000Z')").run();
+ const p=await cleanupPreview({...cleanupInput,contact:false,handovers:false});expect(p.counts.audits).toBe(1);await cmd('records_cleanup_execute',{job_id:p.job_id,confirmation:'刪除紀錄'});expect(await get("SELECT id FROM audit_logs WHERE id='before'")).toBeNull();expect(await get("SELECT id FROM audit_logs WHERE id='at'")).toBeTruthy();expect(await get("SELECT id FROM audit_logs WHERE id='old-cleanup'")).toBeTruthy();expect(await get('SELECT id FROM teachers WHERE id=?',tid)).toBeTruthy();
+});
 it('預覽登入指引僅公開正式網址與版本，不暴露憑證且不放寬登入及資料權限',async()=>{
  const before=await get("SELECT count(*) AS n FROM audit_logs WHERE action='login'");
  const info=await request('/public-info',undefined,'','',{Origin:'https://preview.example'});expect(info.status).toBe(200);
@@ -137,7 +255,7 @@ describe('Workers / D1 真實本機 Runtime 整合（LINE HTTP 以 Mock 替代�
  });
  it('登入錯誤限制、停用帳號、雜湊不含明碼',async()=>{
   const saved=await get('SELECT password_hash FROM admins WHERE id=?','test-admin');expect(saved.password_hash).not.toContain(credentials.password);
-  for(let i=0;i<4;i++)expect((await request('/login',{username:credentials.username,password:randomUUID()},'','')).status).toBe(401);
+  for(let i=0;i<5;i++)expect((await request('/login',{username:credentials.username,password:randomUUID()},'','')).status).toBe(401);
   expect((await request('/login',credentials,'','')).status).toBe(429);
   await db.prepare('UPDATE admins SET active=0 WHERE id=?').bind('test-staff').run();expect((await request('/session',undefined,staffCookie,staffCsrf)).status).toBe(401);
  });
@@ -320,4 +438,92 @@ it('維護修復保留原帳號與教師，撤銷 Session 並恢復登入',async
 it('資料庫未套用完整結構時回安全的明確提示，不洩漏 SQL',async()=>{
  await db.prepare('ALTER TABLE rate_limits RENAME TO temporary_rate_limits').run();
  try{const response=await request('/login',credentials,'','');expect(response.status).toBe(503);const body:any=await response.json();expect(body.code).toBe('DATABASE_SCHEMA_MISSING');expect(JSON.stringify(body)).not.toContain('SELECT');}finally{await db.prepare('ALTER TABLE temporary_rate_limits RENAME TO rate_limits').run();}
+});
+
+it('個人綁定連結使用官方帳號識別並預填同一個一次性碼，失敗時可手動綁定',async()=>{
+ const tid=await teacher(),r=await cmd('issue_code',{teacher_id:tid}),body:any=await r.json();
+ expect(body.binding_link).toBe('https://line.me/R/oaMessage/%40office-test/?'+body.code);
+ expect(JSON.stringify(body)).not.toContain(bindingPepper);expect((await get('SELECT code_hash FROM binding_codes WHERE teacher_id=?',tid)).code_hash).not.toBe(body.code);
+ const other=await teacher();botStatus=401;const fallback:any=await(await cmd('issue_code',{teacher_id:other})).json();expect(fallback.binding_link).toBeNull();expect(fallback.code).toHaveLength(12);
+ expect((await hook([ev(body.code)])).status).toBe(200);expect((await get('SELECT bound_at FROM teachers WHERE id=?',tid)).bound_at).toBeTruthy();
+});
+async function pickupNotices(tid:string,count=2){
+ for(let i=0;i<count;i++){const r=await cmd('send',{request_id:randomUUID(),teacher_ids:[tid],kind:i%2?'mail':'parcel',content:'虛構領件 '+i,duplicate_confirmed:true});expect(r.status).toBe(200);}
+ return (await db.prepare('SELECT id,version FROM notifications WHERE teacher_id=? ORDER BY id').bind(tid).all<any>()).results;
+}
+it('多筆領件驗證相同教師及版本，保留完成經辦、逐筆稽核並可整批一次復原',async()=>{
+ const tid=await teacher(true),items=(await pickupNotices(tid)).map(n=>({id:n.id,expected_version:n.version})),payload={request_id:randomUUID(),teacher_id:tid,items};calls=[];
+ const r=await cmd('pickup_many',payload,staffCookie,staffCsrf);expect(r.status).toBe(200);const body:any=await r.json();expect(body.undo.ids).toHaveLength(2);
+ expect((await get("SELECT count(*) AS n FROM notifications WHERE status='已完成' AND completed_by='test-staff' AND completed_at IS NOT NULL")).n).toBe(2);
+ expect((await get("SELECT count(*) AS n FROM audit_logs WHERE action='pickup_many'")).n).toBe(2);expect(calls).toHaveLength(0);
+ expect((await cmd('pickup_many',payload,staffCookie,staffCsrf)).status).toBe(200);expect((await get('SELECT count(*) AS n FROM undo_actions')).n).toBe(2);
+ expect((await cmd('undo_many',{request_id:randomUUID(),ids:body.undo.ids})).status).toBe(409);
+ const undo={request_id:randomUUID(),ids:body.undo.ids};expect((await cmd('undo_many',undo,staffCookie,staffCsrf)).status).toBe(200);expect((await cmd('undo_many',undo,staffCookie,staffCsrf)).status).toBe(200);
+ expect((await get("SELECT count(*) AS n FROM notifications WHERE status='待領取' AND completed_at IS NULL AND completed_by IS NULL")).n).toBe(2);
+ expect((await cmd('pickup_many',payload,staffCookie,staffCsrf)).status).toBe(200);expect((await get("SELECT count(*) AS n FROM notifications WHERE status='已完成'")).n).toBe(0);
+});
+it('多筆領件任一筆過時、跨教師或格式異常時整批不變更，未登入與 CSRF 仍拒絕',async()=>{
+ const tid=await teacher(true),other=await teacher(true),notices=await pickupNotices(tid),make=()=>({request_id:randomUUID(),teacher_id:tid,items:notices.map(n=>({id:n.id,expected_version:n.version}))});
+ const stale=make();stale.items[1].expected_version=999;expect((await cmd('pickup_many',stale)).status).toBe(409);
+ expect((await cmd('pickup_many',{...make(),teacher_id:other})).status).toBe(409);expect((await cmd('pickup_many',{...make(),items:[make().items[0],make().items[0]]})).status).toBe(400);
+ expect((await cmd('pickup_many',make(),'','')).status).toBe(401);expect((await cmd('pickup_many',make(),cookie,'wrong')).status).toBe(403);
+ expect((await get("SELECT count(*) AS n FROM notifications WHERE status='待領取'")).n).toBe(2);expect((await get('SELECT count(*) AS n FROM undo_actions')).n).toBe(0);
+});
+it('整批復原任一筆被同事更新或逾期便全部拒絕，不覆蓋其他資料',async()=>{
+ const tid=await teacher(true),items=(await pickupNotices(tid)).map(n=>({id:n.id,expected_version:n.version}));
+ const r:any=await(await cmd('pickup_many',{request_id:randomUUID(),teacher_id:tid,items})).json();
+ await cmd('complete',{id:items[0].id,status:'待回覆',expected_version:2});expect((await cmd('undo_many',{request_id:randomUUID(),ids:r.undo.ids})).status).toBe(409);
+ expect((await get("SELECT status FROM notifications WHERE id=?",items[1].id)).status).toBe('已完成');expect((await get('SELECT count(*) AS n FROM undo_actions WHERE used_at IS NOT NULL')).n).toBe(0);
+ await db.prepare('UPDATE undo_actions SET expires_at=0').run();expect((await cmd('undo_many',{request_id:randomUUID(),ids:[r.undo.ids[1]]})).status).toBe(409);
+});
+it('已有待領取須明確確認才發新通知；確認後重試不重複，其他聯絡不受影響',async()=>{
+ const tid=await teacher(true);await pickupNotices(tid,1);calls=[];
+ const pre:any=await(await cmd('notification_preflight',{teacher_ids:[tid]})).json();expect(pre.pending[0].count).toBe(1);
+ const payload={request_id:randomUUID(),teacher_ids:[tid],kind:'mail',content:'新信件'};
+ const blocked=await cmd('send',payload);expect(blocked.status).toBe(409);expect((await blocked.json() as any).code).toBe('DUPLICATE_NOTICE');expect(calls).toHaveLength(0);
+ expect((await get('SELECT count(*) AS n FROM notifications')).n).toBe(1);expect(await get('SELECT id FROM send_requests WHERE id=?',payload.request_id)).toBeNull();
+ expect((await cmd('send',{...payload,duplicate_confirmed:true})).status).toBe(200);expect((await cmd('send',{...payload,duplicate_confirmed:true})).status).toBe(200);expect(calls).toHaveLength(1);
+ expect((await cmd('send',{request_id:randomUUID(),teacher_ids:[tid],kind:'contact',content:'其他行政聯絡'})).status).toBe(200);
+});
+it('兩位行政同時發送相同教師的新領件通知時，未確認的第二批被擋下',async()=>{
+ const tid=await teacher(true),send=()=>({request_id:randomUUID(),teacher_ids:[tid],kind:'parcel',content:'同時測試'});
+ const results=await Promise.all([cmd('send',send()),cmd('send',send(),staffCookie,staffCsrf)]);expect(results.map(r=>r.status).sort()).toEqual([200,409]);expect((await get('SELECT count(*) AS n FROM notifications')).n).toBe(1);
+});
+it('交接搜尋查詢完整資料庫，依台灣完成日期、交接人及完成人篩選並驗證權限格式',async()=>{
+ const now=new Date().toISOString();await db.prepare(`WITH RECURSIVE seq(n) AS(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<1010) INSERT INTO handovers(id,content,created_by,creator_name,handover_name,created_at,completed_at,completed_by,finisher_name) SELECT 'history-'||n,CASE WHEN n=1 THEN '較早交接100%_' ELSE '一般交接'||n END,'test-admin','管理員',CASE WHEN n=1 THEN '交接甲' ELSE '其他交接人' END,?,CASE WHEN n=1 THEN '2025-11-16T16:01:00.000Z' ELSE ? END,'test-admin',CASE WHEN n=1 THEN '完成乙' ELSE '其他完成人' END FROM seq`).bind(now,now).run();
+ for(const query of ['100%_','交接甲','完成乙']){const r=await cmd('handover_history',{page:1,period:'date',date:'2025-11-17',query},staffCookie,staffCsrf);expect(r.status).toBe(200);const body:any=await r.json();expect(body.total).toBe(1);expect(body.items[0].id).toBe('history-1');}
+ const page:any=await(await cmd('handover_history',{page:2,period:'today'})).json();expect(page.items).toHaveLength(5);expect(page.total).toBe(1009);
+ expect((await cmd('handover_history',{page:1,period:'date',date:'2026-02-30'})).status).toBe(400);expect((await cmd('handover_history',{page:1,period:'today'},'','')).status).toBe(401);
+});
+it('一百筆領件與復原使用固定數量查詢，不超過 D1 批次參數上限',async()=>{
+ const tid=await teacher(true),now=new Date().toISOString();
+ await db.prepare(`WITH RECURSIVE seq(n) AS(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<100) INSERT INTO notifications(id,request_id,teacher_id,kind,content,sender_id,binding_version,retry_key,send_status,status,created_at,sent_at) SELECT 'bulk-pickup-'||n,'bulk-request-'||n,?,'mail','虛構百筆測試','test-admin',1,'bulk-retry-'||n,'accepted','待領取',?,? FROM seq`).bind(tid,now,now).run();
+ const items=Array.from({length:100},(_,i)=>({id:'bulk-pickup-'+(i+1),expected_version:1}));
+ const r=await cmd('pickup_many',{request_id:randomUUID(),teacher_id:tid,items});expect(r.status).toBe(200);const body:any=await r.json();expect(body.undo.ids).toHaveLength(100);expect((await get("SELECT count(*) AS n FROM notifications WHERE status='已完成'")).n).toBe(100);
+ const undo=await cmd('undo_many',{request_id:randomUUID(),ids:body.undo.ids});expect(undo.status).toBe(200);expect((await get("SELECT count(*) AS n FROM notifications WHERE status='待領取'")).n).toBe(100);expect(calls).toHaveLength(0);
+});
+it('自填待領物品正確儲存、聊天與歷史顯示，單筆及多筆領取可復原',async()=>{
+ const tid=await teacher(true),payload={request_id:randomUUID(),teacher_ids:[tid],kind:'pickup',pickup_name:'借用器材',content:'請來辦公室領取',duplicate_confirmed:true};
+ const r=await cmd('send',payload,staffCookie,staffCsrf);expect(r.status).toBe(200);const n=await get('SELECT * FROM notifications WHERE request_id=?',payload.request_id);expect(n.kind).toBe('custom');expect(n.pickup_name).toBe('借用器材');expect(n.status).toBe('待領取');
+ expect(calls.at(-1)!.body.messages[0].text).toBe('請來辦公室領取');const c:any=await(await request('/conversation?teacher_id='+tid)).json();expect(c.pickups[0].pickup_name).toBe('借用器材');
+ const history:any=await(await request('/notifications/query',{query:'借用器材'})).json();expect(history.total).toBe(1);expect(history.notices[0].pickup_name).toBe('借用器材');
+ const done:any=await(await cmd('complete',{id:n.id,status:'已完成',expected_version:1})).json();expect(done.undo.id).toBeTruthy();await cmd('undo',{id:done.undo.id});
+ const current=await get('SELECT * FROM notifications WHERE id=?',n.id),batch:any=await(await cmd('pickup_many',{request_id:randomUUID(),teacher_id:tid,items:[{id:n.id,expected_version:current.version}]})).json();expect(batch.undo.ids).toHaveLength(1);expect((await cmd('undo_many',{request_id:randomUUID(),ids:batch.undo.ids})).status).toBe(200);
+});
+it('自填物品名稱必填、限八十字、不能混入一般訊息；也要通過綁定與重複通知檢查',async()=>{
+ const tid=await teacher(true),base={request_id:randomUUID(),teacher_ids:[tid],kind:'pickup',content:'測試文字'};
+ for(const pickup_name of [undefined,'','   ','物'.repeat(81),123])expect((await cmd('send',{...base,pickup_name})).status).toBe(400);
+ expect((await cmd('send',{...base,kind:'custom',pickup_name:'不可混用'})).status).toBe(400);
+ expect((await cmd('send',{...base,pickup_name:'教材'})).status).toBe(200);
+ const duplicate=await cmd('send',{...base,request_id:randomUUID(),pickup_name:'另一件'});expect(duplicate.status).toBe(409);expect((await duplicate.json() as any).code).toBe('DUPLICATE_NOTICE');
+ const pending:any=await(await cmd('notification_preflight',{teacher_ids:[tid]})).json();expect(pending.pending[0].count).toBe(1);
+ const unbound=await teacher();expect((await cmd('send',{...base,request_id:randomUUID(),teacher_ids:[unbound],pickup_name:'教材'})).status).toBe(409);
+ expect((await cmd('send',{...base,pickup_name:'更改名稱',duplicate_confirmed:true})).status).toBe(409);
+});
+it('輕量版本檢查有 Session 與來源保護，無變更回 304 且不產生操作或限流寫入',async()=>{
+ const data=await request('/data'),tag=data.headers.get('etag')!,before=await get('SELECT version FROM system_meta WHERE id=1'),audits=await get('SELECT count(*) AS n FROM audit_logs'),rates=await get('SELECT count(*) AS n FROM rate_limits');
+ const r=await request('/changes',undefined,cookie,csrf,{'If-None-Match':tag});expect(r.status).toBe(304);expect(await r.text()).toBe('');expect((await get('SELECT version FROM system_meta WHERE id=1')).version).toBe(before.version);expect((await get('SELECT count(*) AS n FROM audit_logs')).n).toBe(audits.n);expect((await get('SELECT count(*) AS n FROM rate_limits')).n).toBe(rates.n);
+ const tid=await teacher(true),changed=await request('/changes',undefined,cookie,csrf,{'If-None-Match':tag});expect(changed.status).toBe(200);expect(await changed.json()).toEqual({changed:true});
+ expect((await request('/changes',undefined,'','')).status).toBe(401);expect((await request('/changes',undefined,cookie,csrf,{Origin:'https://other.example'})).status).toBe(403);
+ const t=await get('SELECT * FROM teachers WHERE id=?',tid),v=t.conversation_version;await hook([ev('新文字',t.line_user_id)]);expect((await get('SELECT conversation_version FROM teachers WHERE id=?',tid)).conversation_version).toBeGreaterThan(v);
 });
