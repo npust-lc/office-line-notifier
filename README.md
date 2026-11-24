@@ -2,7 +2,9 @@
 
 保留現有 React／Vite 介面，改以 **Cloudflare Workers＋D1** 處理登入、教師綁定、LINE 純文字通知與雙向聊天。正式網頁優先使用 **Cloudflare Pages Advanced Mode**：前端與 `/api/*` 在同一網域，由 Workers 執行後端，避免跨站 Cookie 問題。GitHub 繼續管理原始碼。
 
-**目前完成本機版本，沒有建立遠端 D1、部署 Cloudflare 或使用真實 LINE 憑證。LINE HTTP 測試使用 Mock，尚未完成正式服務驗收。** 不使用檔案儲存服務；文件及附件請使用辦公室 Email 傳送。原始黑黃透明 Logo、六張卡片、系統管理配置、交接與內部備註均保留。
+**本次更新先在本機測試，未更動既有正式站或正式資料庫。新改動的 LINE HTTP 測試使用 Mock，仍需在正式更新後驗收。** 不使用檔案儲存服務；文件及附件請使用辦公室 Email 傳送。原始黑黃透明 Logo、六張卡片、系統管理配置、交接與內部備註均保留。
+
+最新流程與升級方式請看 [2026.11.24.1 操作流程更新](docs/OFFICE-WORKFLOWS-UPDATE.md)。本版需套用 D1 Migration 0006，先備份再更新。
 
 ## 1. Windows 本機操作
 
@@ -11,7 +13,7 @@
 ```powershell
 cd $HOME
 # 已下載者不要重複 clone，改進入實際存放位置。
-git clone https://github.com/ching-yu430/office-line-notifier.git
+git clone https://github.com/npust-lc/office-line-notifier.git
 cd .\office-line-notifier
 npm ci
 Copy-Item .env.example .env
