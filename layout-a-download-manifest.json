@@ -1,0 +1,19 @@
+{
+  "version": "2026.11.24.2",
+  "implementation_commit": "98b5933b44023ec0a9d975878eec0b8831b23231",
+  "pull_request": "https://github.com/npust-lc/office-line-notifier/pull/5",
+  "new_migrations": [],
+  "configuration_files_included": false,
+  "files": [
+    {
+      "name": "office-line-notifier-layout-a-preview.zip",
+      "bytes": 702197,
+      "sha256": "4ded2bd5d949e3225415f9b34f21bc6dc5f19caf8560943d5e6a69dd8c3327c5"
+    },
+    {
+      "name": "office-line-notifier-layout-a-update.zip",
+      "bytes": 43370,
+      "sha256": "33dfd371cfd2e3e553cb3592fe2ac2a031c5e41a2f8af42a7d8fd969c1868ab4"
+    }
+  ]
+}
