@@ -6,6 +6,8 @@
 
 最新流程與升級方式請看 [2026.11.24.1 操作流程更新](docs/OFFICE-WORKFLOWS-UPDATE.md)。本版需套用 D1 Migration 0006，先備份再更新。
 
+訊息中心 A 版排列與更新方式見 [2026.11.24.2 說明](docs/MESSAGE-CENTER-LAYOUT-A.md)。
+
 ## 1. Windows 本機操作
 
 安裝 [Node.js 24 LTS](https://nodejs.org/) 與 [Git for Windows](https://git-scm.com/download/win)。下列為 PowerShell 指令，先下載專案，才會有可進入的資料夾：
