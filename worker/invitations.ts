@@ -1,6 +1,26 @@
 import {type Env,type Actor,HttpError,admin,id,iso,unix,audit} from './types';
 import {randomToken,sha256,hmacDigest,equal} from './security';
 import {limit} from './auth';
+import {operationalFailure} from './errors';
+
+const schemaUnavailable=()=>new HttpError(503,'專屬邀請資料庫尚未完成 0007 升級，請先使用其他綁定方式，並由維護人員套用 Migration 0007','INVITATION_SCHEMA_MISSING');
+async function requireInvitationSchema(env:Env){
+ try{
+  const result=await env.DB.batch([
+   env.DB.prepare('SELECT id,teacher_id,token_hash,issued_by,issued_at,revoked_at,used_at FROM binding_invitations LIMIT 0'),
+   env.DB.prepare('SELECT state_hash,invitation_id,browser_hash,nonce,verifier,expires_at,claim_token,line_user_id,access_token_sealed,verified_at,completed_at FROM binding_oauth LIMIT 0'),
+   env.DB.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name='invalidate_teacher_invitation'")
+  ]);
+  if(result[2].results.length!==1)throw schemaUnavailable();
+ }catch(error){if(operationalFailure(error)?.code==='DATABASE_SCHEMA_MISSING')throw schemaUnavailable();throw error;}
+}
+// 選用功能的清理不可使已套用 0006 的後台整頁失效；不自動建表或改動 Migration 紀錄。
+export async function cleanupInvitationSessions(env:Env){
+ const exists=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='binding_oauth'").first();
+ if(!exists)return;
+ try{await env.DB.prepare('DELETE FROM binding_oauth WHERE expires_at<=?').bind(unix()).run();}
+ catch(error){if(operationalFailure(error)?.code!=='DATABASE_SCHEMA_MISSING')throw error;}
+}
 
 const validToken=/^[a-f0-9-]{36}\.[a-f0-9]{64}$/;
 function configured(env:Env){
@@ -48,19 +68,20 @@ export async function invitationCommand(env:Env,actor:Actor,action:string,p:any)
  if(!['invitation_get','invitation_issue','invitation_revoke'].includes(action))return undefined;
  admin(actor);const tid=id(p.teacher_id),db=env.DB;
  if(action==='invitation_revoke'){
+  await requireInvitationSchema(env);
   await db.batch([db.prepare('UPDATE binding_invitations SET revoked_at=coalesce(revoked_at,?) WHERE teacher_id=? AND used_at IS NULL').bind(iso(),tid),audit(db,actor.id,action,tid)]);return {invitation_link:null};
  }
  const teacher=await db.prepare('SELECT * FROM teachers WHERE id=? AND active=1 AND line_user_id IS NULL').bind(tid).first();
  if(!teacher)throw new HttpError(409,'教師已綁定、停用或不存在');
  if(action==='invitation_get'){
-  try{configured(env);}catch(e){if(e instanceof HttpError)return {configured:false,invitation_link:null};throw e;}
+  try{configured(env);await requireInvitationSchema(env);}catch(e){if(e instanceof HttpError&&e.status===503)return {configured:false,invitation_link:null,unavailable_reason:e.message};throw e;}
   const old=await db.prepare('SELECT * FROM binding_invitations WHERE teacher_id=? AND revoked_at IS NULL AND used_at IS NULL').bind(tid).first<any>();
   if(!old)return {configured:true,invitation_link:null};
   const token=await signedToken(env,old.id);
   if(!equal(await sha256(token),old.token_hash))return {configured:true,invitation_link:null};
   return {configured:true,invitation_link:env.ALLOWED_ORIGIN+'/bind#'+token,issued_at:old.issued_at};
  }
- configured(env);await limit(env,'invitation-issue:'+actor.id,60,600);
+ configured(env);await requireInvitationSchema(env);await limit(env,'invitation-issue:'+actor.id,60,600);
  const key=crypto.randomUUID(),token=await signedToken(env,key),now=iso();
  const result=await db.batch([
   // 先移除舊流程再輪替邀請；整批交易避免舊邀請與新邀請並存。
@@ -75,6 +96,7 @@ export async function invitationCommand(env:Env,actor:Actor,action:string,p:any)
 
 export async function bindingPublic(req:Request,env:Env,action:string,body:any){
  configured(env);
+ await requireInvitationSchema(env);
  await limit(env,'binding-web:'+await hmacDigest(req.headers.get('CF-Connecting-IP')||'local',env.BINDING_PEPPER),120,600);
  await env.DB.prepare('DELETE FROM binding_oauth WHERE expires_at<=?').bind(unix()).run();
  if(action==='open'){await invitation(env,body.token);return json({ready:true});}
