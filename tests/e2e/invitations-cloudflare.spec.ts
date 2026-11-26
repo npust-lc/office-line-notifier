@@ -6,7 +6,7 @@ import {randomBytes,randomUUID,createHash} from 'node:crypto';
 import {migrationStatements} from '../migrations';
 
 const origin='http://localhost:5178',hash=(v:string)=>createHash('sha256').update(v).digest('hex');
-let mf:Miniflare,vite:ChildProcess,invitationLink:string,nonce='',friend=false;
+let mf:Miniflare,vite:ChildProcess,invitationLink:string,adminSession='',nonce='',friend=false;
 const uid='U'+randomBytes(16).toString('hex'),secret=randomBytes(32).toString('hex');
 test.beforeAll(async()=>{
  const built=await build({entryPoints:['worker/index.ts'],bundle:true,format:'esm',platform:'browser',write:false});
@@ -19,7 +19,7 @@ test.beforeAll(async()=>{
   throw Error('未允許的 LINE 測試請求');
  }});
  const db=await mf.getD1Database('DB');await db.batch(migrationStatements().map(sql=>db.prepare(sql)));
- const now=new Date().toISOString(),token=randomBytes(32).toString('hex'),csrf=randomBytes(32).toString('hex');
+ const now=new Date().toISOString(),token=randomBytes(32).toString('hex'),csrf=randomBytes(32).toString('hex');adminSession=token;
  await db.prepare("INSERT INTO admins VALUES('test-admin','test-only','虛構管理員',?,'admin',1,?,?)").bind(randomUUID(),now,now).run();
  await db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?)').bind(hash(token),'test-admin',hash(csrf),csrf,Math.floor(Date.now()/1000)+3600,now).run();
  await db.prepare("INSERT INTO teachers(id,name,department,created_at,updated_at) VALUES('test-teacher','虛構綁定教師','測試單位',?,?)").bind(now,now).run();
@@ -39,4 +39,15 @@ test('Cloudflare 教師完整流程：無行政登入、OAuth Cookie 回呼、�
  await page.getByRole('button',{name:'確認綁定虛構綁定教師'}).click();await expect(page.getByRole('link',{name:'開啟官方帳號'})).toBeVisible();friend=true;await page.getByRole('button',{name:'已加入，確認綁定'}).click();
  await expect(page.getByRole('heading',{name:'身分綁定成功'})).toBeVisible();await page.reload();await expect(page.getByRole('heading',{name:'身分綁定成功'})).toBeVisible();expect((await db.prepare('SELECT line_user_id FROM teachers').first<any>())!.line_user_id).toBe(uid);
  expect(apiPaths).not.toContain('/api/session');expect(apiPaths).not.toContain('/api/data');expect(apiPaths).not.toContain('/api/changes');expect(errors).toEqual([]);
+});
+
+
+test('Cloudflare 僅有 0006 仍可查看後台，邀請提示 0007 未完成並可使用備用碼',async({page,context})=>{
+ const db=await mf.getD1Database('DB');
+ await db.batch([db.prepare('DROP TRIGGER invalidate_teacher_invitation'),db.prepare('DROP TABLE binding_oauth'),db.prepare('DROP TABLE binding_invitations'),db.prepare("UPDATE teachers SET line_user_id=NULL,bound_at=NULL WHERE id='test-teacher'")]);
+ await context.addCookies([{name:'office_session',value:adminSession,url:origin,httpOnly:true,sameSite:'Lax'}]);
+ await page.route(origin+'/api/**',async route=>{const r=route.request(),response=await mf.dispatchFetch(r.url(),{method:r.method(),headers:await r.allHeaders(),...(r.method()==='POST'?{body:r.postData()!}:{}),redirect:'manual'});await route.fulfill({status:response.status,headers:Object.fromEntries(response.headers),body:await response.text()});});
+ await page.goto(origin);await expect(page.getByRole('heading',{name:'值班工作台',exact:true})).toBeVisible();await expect(page.getByRole('alert')).toHaveCount(0);
+ await page.getByRole('button',{name:'教師名單',exact:true}).click();await page.getByRole('row').filter({hasText:'虛構綁定教師'}).getByRole('button',{name:'管理綁定'}).click();const dialog=page.getByRole('dialog');
+ await expect(dialog).toContainText('0007');await expect(dialog.getByRole('button',{name:'產生專屬邀請',exact:true})).toHaveCount(0);await dialog.getByText('其他綁定方式',{exact:true}).click();await dialog.getByRole('button',{name:'產生綁定碼',exact:true}).click();await expect(dialog.locator('.code')).toHaveText(/^[A-Z2-9]{12}$/);
 });

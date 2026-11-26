@@ -4,6 +4,8 @@
 
 **本次更新先在本機測試，未更動既有正式站或正式資料庫。新改動的 LINE HTTP 測試使用 Mock，仍需在正式更新後驗收。** 不使用檔案儲存服務；文件及附件請使用辦公室 Email 傳送。原始黑黃透明 Logo、六張卡片、系統管理配置、交接與內部備註均保留。
 
+0007 缺表造成後台載入失敗的原因與防護更新，請看 [2026.11.26.1 相容修復](docs/INVITATION-SCHEMA-RECOVERY.md)。本次防護沒有新增 Migration；專屬邀請仍需完整套用 0007。
+
 教師專屬邀請更新請看 [專屬邀請設定與升級](docs/TEACHER-INVITATIONS.md)，此版新增 Migration 0007，保留七天綁定碼作為備用。需另設 LINE Login Channel；目前尚未真實 LINE Login 驗證。
 
 先前流程與升級方式請看 [2026.11.24.1 操作流程更新](docs/OFFICE-WORKFLOWS-UPDATE.md)。該次更新需套用 D1 Migration 0006，先備份再更新。

@@ -8,7 +8,7 @@ import{operationalFailure}from'./errors';
 import{APP_VERSION}from'../src/version';
 import{notificationHistory}from'./notification-history';
 import {pickupFields} from './pickup-items';
-import {bindingPublic,bindingCallback} from './invitations';
+import {bindingPublic,bindingCallback,cleanupInvitationSessions} from './invitations';
 const securityHeaders={'X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','X-Frame-Options':'DENY','Permissions-Policy':'camera=(), microphone=(), geolocation=()'};
 export default {
  async fetch(req:Request,env:Env):Promise<Response>{
@@ -90,7 +90,8 @@ export default {
    }
    if(path==='/api/data'&&req.method==='GET'){
     await recover(env.DB);
-    await env.DB.batch([env.DB.prepare('DELETE FROM binding_oauth WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM reply_presence WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM undo_actions WHERE expires_at<?').bind(unix()-86400),env.DB.prepare('DELETE FROM pickup_item_undo WHERE expires_at<?').bind(unix()-600)]);
+    await cleanupInvitationSessions(env);
+    await env.DB.batch([env.DB.prepare('DELETE FROM reply_presence WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM undo_actions WHERE expires_at<?').bind(unix()-86400),env.DB.prepare('DELETE FROM pickup_item_undo WHERE expires_at<?').bind(unix()-600)]);
     const version=(await env.DB.prepare('SELECT version FROM system_meta WHERE id=1').first<{version:number}>())!.version;
     const etag=`"${s.id}-${s.role}-${version}"`;headers.set('ETag',etag);
     if(req.headers.get('if-none-match')===etag)return new Response(null,{status:304,headers});
@@ -147,5 +148,5 @@ export default {
    return json({error:'操作失敗，請稍後重試或聯絡管理員',code:'INTERNAL_ERROR'},500);
   }
  },
- async scheduled(_event:ScheduledEvent,env:Env,ctx:ExecutionContext){ctx.waitUntil(env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM rate_limits WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM binding_oauth WHERE expires_at<=?').bind(unix())]).then(()=>recover(env.DB)));}
+ async scheduled(_event:ScheduledEvent,env:Env,ctx:ExecutionContext){ctx.waitUntil(env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM rate_limits WHERE expires_at<=?').bind(unix())]).then(()=>cleanupInvitationSessions(env)).then(()=>recover(env.DB)));}
 };
