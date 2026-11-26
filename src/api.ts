@@ -55,6 +55,7 @@ normalize();
 function readLatestDemo(){try{const saved=JSON.parse(localStorage.getItem(storageKey)||'null');if(validDemo(saved))demo=saved;}catch{}normalize();}
 let demoRole='admin';
 // Volatile only: do not persist plaintext demo codes.
+const invitations=new Map<string,{invitation_link:string;issued_at:string}>();
 const codes=new Map<string,{teacher_id:string;expires:number}>();
 function persist(){syncMockPickups(demo);try{localStorage.setItem(storageKey,JSON.stringify(demo));}catch{}window.dispatchEvent(new Event('office-refresh'));}
 export function changeDemoRole(role:string){demoRole=role;}
@@ -103,7 +104,7 @@ export async function loadConversation(teacherId:string,before?:number,knownFrom
 export async function command(action:string,payload:any={}):Promise<any>{
  if(!mock)return (await request('/command',{action,payload})).json();
  readLatestDemo();
- if((['teacher_save','issue_code','unbind','staff_save','template_save','mock_cleanup_seed','mock_cleanup_failed_seed'].includes(action)||action.startsWith('records_cleanup_')||action.startsWith('records_backup_'))&&demoRole!=='admin')throw Error('需要管理員權限');
+ if((['teacher_save','issue_code','invitation_get','invitation_issue','invitation_revoke','unbind','staff_save','template_save','mock_cleanup_seed','mock_cleanup_failed_seed'].includes(action)||action.startsWith('records_cleanup_')||action.startsWith('records_backup_'))&&demoRole!=='admin')throw Error('需要管理員權限');
  const t=demo.teachers.find(t=>t.id===payload.teacher_id);
  let result:any={};
  const actor=demoRole==='admin'?'demo-admin':'demo-staff',actorName=demo.staff.find(s=>s.id===actor)?.display_name||'行政人員';
@@ -128,8 +129,14 @@ export async function command(action:string,payload:any={}):Promise<any>{
  }
  const revision=(h:Handover,before:Handover|null)=>demo.handover_revisions.unshift({id:crypto.randomUUID(),handover_id:h.id,action,actor_id:actor,actor_name:actorName,before_data:before,after_data:structuredClone(h),reason:payload.reason?.trim()||null,created_at:now()});
  if(action==='teacher_save'){if(t)Object.assign(t,{name:payload.name,department:payload.department,notes:payload.notes,active:payload.active});else demo.teachers.push({id:crypto.randomUUID(),...payload,bound_at:null,last_notified_at:null});}
+ if(action==='invitation_get'||action==='invitation_issue'||action==='invitation_revoke'){
+  if(!t?.active||t.bound_at)throw Error('教師已綁定或已停用');
+  if(action==='invitation_issue')invitations.set(t.id,{invitation_link:new URL((document.documentElement.dataset.officePreview==='offline'?location.pathname+'?teacher-invitation=1':'/bind')+'#'+t.id+'.'+crypto.randomUUID(),location.href).toString(),issued_at:now()});
+  if(action==='invitation_revoke')invitations.delete(t.id);
+  result={configured:true,invitation_link:null,...invitations.get(t.id)};
+ }
  if(action==='issue_code'){if(!t?.active||t.bound_at)throw Error('教師已綁定或已停用');for(const [key,v] of codes)if(v.teacher_id===t.id)codes.delete(key);const code=Array.from(crypto.getRandomValues(new Uint8Array(12)),n=>'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[n%32]).join('');codes.set(code,{teacher_id:t.id,expires:Date.now()+7*86400000});result={code,binding_link:'https://example.invalid/line-binding?code='+encodeURIComponent(code),expires_at:new Date(Date.now()+7*86400000).toISOString()};}
- if(action==='unbind'&&t){t.bound_at=null;for(const [key,v]of codes)if(v.teacher_id===t.id)codes.delete(key);}
+ if(action==='unbind'&&t){invitations.delete(t.id);t.bound_at=null;for(const [key,v]of codes)if(v.teacher_id===t.id)codes.delete(key);}
  if(action==='mock_bind'){const c=codes.get(payload.code.trim().toUpperCase().replace(/[ -]/g,''));if(!c||c.expires<=Date.now())throw Error('綁定碼無效或已過期');const teacher=demo.teachers.find(t=>t.id===c.teacher_id)!;if(!teacher.active||teacher.bound_at)throw Error('無法重複綁定');teacher.bound_at=now();codes.delete(payload.code.trim().toUpperCase().replace(/[ -]/g,''));}
  if(action==='conversation_view'){
   const index=demo.messages.findIndex(m=>m.id===payload.message_id&&m.teacher_id===payload.teacher_id&&m.direction==='in');if(index<0)throw Error('訊息已變更，請重新載入對話');

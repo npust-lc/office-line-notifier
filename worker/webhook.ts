@@ -16,7 +16,7 @@ export async function webhook(req:Request,env:Env){
  const fresh=(await env.DB.prepare('SELECT id,claim_token,outcome FROM webhook_events WHERE claim_token IN (SELECT value FROM json_each(?))').bind(JSON.stringify(plans.map(p=>p.claim))).all<{id:string;claim_token:string;outcome:string}>()).results;
  const replies: {id:string;token:string;content:string}[]=[];
  for(const plan of plans){const result=fresh.find(r=>r.id===plan.e.webhookEventId&&r.claim_token===plan.claim);if(!result)continue;const e=plan.e;let content:string|undefined;
-  if(e.source.type==='user'&&e.type==='follow')content='歡迎加入辦公室通知帳號，請輸入行政人員提供的一次性綁定碼。文件及附件請使用辦公室 Email 傳送。';
+  if(e.source.type==='user'&&e.type==='follow')content='歡迎加入辦公室通知帳號。若使用專屬邀請連結，請回到邀請頁確認綁定；若收到綁定碼，請在此傳送。文件及附件請使用辦公室 Email 傳送。';
   if(result.outcome==='bound')content=successReply;
   if(result.outcome==='invalid_code')content='綁定碼無效、已使用或已過期，請向辦公室確認。';
   if(result.outcome==='rate_limited')content='嘗試次數過多，請一小時後再試，或聯絡辦公室。';

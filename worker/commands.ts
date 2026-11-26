@@ -10,8 +10,10 @@ import{APP_VERSION}from'../src/version';
 import {recordCleanup} from './record-cleanup';
 import {recordBackup} from './record-backup';
 import {pickupItemCommand} from './pickup-items';
+import {invitationCommand} from './invitations';
 export async function command(env:Env,actor:Actor,action:string,p:any){
  const db=env.DB,now=iso();
+ const invitation=await invitationCommand(env,actor,action,p);if(invitation!==undefined)return invitation;
  const itemResult=await pickupItemCommand(env,actor,action,p);if(itemResult!==undefined)return itemResult;
  const backup=await recordBackup(env,actor,action,p);if(backup!==undefined)return backup;
  const cleanup=await recordCleanup(env,actor,action,p);if(cleanup!==undefined)return cleanup;
