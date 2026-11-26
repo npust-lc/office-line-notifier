@@ -4,6 +4,7 @@ export interface Env {
  ALLOWED_ORIGIN:string; COOKIE_SECURE?:string; LINE_SEND_ENABLED?:string;
  AUTH_PEPPER:string; BINDING_PEPPER:string;
  LINE_CHANNEL_SECRET?:string; LINE_CHANNEL_ACCESS_TOKEN?:string;
+ LINE_LOGIN_CHANNEL_ID?:string; LINE_LOGIN_CHANNEL_SECRET?:string;
 }
 export type Actor={id:string;username:string;display_name:string;role:'admin'|'staff';active:number};
 export class HttpError extends Error {constructor(public status:number,message:string,public code?:string){super(message);}}

@@ -34,5 +34,6 @@ try{
  html=html.replace(/<meta charset="UTF-8"\s*\/?>/i,'').replace('<html lang="zh-Hant">','<html lang="zh-Hant" data-office-preview="offline"><meta charset="UTF-8">');
  const destination=join(root,'.local','preview');await mkdir(destination,{recursive:true});
  await writeFile(join(destination,'office-line-notifier-preview.html'),html,'utf8');
+ await writeFile(join(destination,'teacher-invitation-preview.html'),html.replace('data-office-preview="offline"','data-office-preview="teacher-invitation"'),'utf8');
  process.stdout.write('已建立 .local/preview/office-line-notifier-preview.html；使用 Chrome 直接開啟，僅虛構資料。\n');
 }finally{await rm(temporary,{recursive:true,force:true});}

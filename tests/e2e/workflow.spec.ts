@@ -6,7 +6,7 @@ test('桌面：綁定、通知、教師回覆與結案',async({page})=>{
  await page.goto('/');await expect(page.getByRole('heading',{name:'值班工作台'})).toBeVisible();
  await page.getByRole('button',{name:'教師名單',exact:true}).click();
  const row=page.getByRole('row').filter({hasText:'示範教師乙'});
- await row.getByRole('button',{name:'產生綁定碼'}).click();
+ await row.getByRole('button',{name:'管理綁定'}).click();await page.getByText('其他綁定方式',{exact:true}).click();await page.getByRole('button',{name:'產生綁定碼',exact:true}).click();
  const code=await page.locator('.code').textContent();await page.getByRole('button',{name:'關閉',exact:true}).click();
  await page.getByLabel('模擬綁定碼').fill(code!);await page.getByRole('button',{name:'模擬老師綁定'}).click();await expect(row.getByText('已綁定',{exact:true})).toBeVisible();
  await page.getByRole('button',{name:'發送通知',exact:true}).click();

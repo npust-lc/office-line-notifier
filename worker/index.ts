@@ -8,6 +8,7 @@ import{operationalFailure}from'./errors';
 import{APP_VERSION}from'../src/version';
 import{notificationHistory}from'./notification-history';
 import {pickupFields} from './pickup-items';
+import {bindingPublic,bindingCallback} from './invitations';
 const securityHeaders={'X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','X-Frame-Options':'DENY','Permissions-Policy':'camera=(), microphone=(), geolocation=()'};
 export default {
  async fetch(req:Request,env:Env):Promise<Response>{
@@ -17,6 +18,7 @@ export default {
    if(!env.ASSETS)return new Response('辦公室 API 服務',{headers:securityHeaders});
    const response=await env.ASSETS.fetch(req);const headers=new Headers(response.headers);for(const [k,v]of Object.entries(securityHeaders))headers.set(k,v);
    headers.set('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+   if(path==='/bind'){headers.set('Referrer-Policy','no-referrer');headers.set('Cache-Control','no-store');}
    return new Response(response.body,{status:response.status,headers});
   }
   const origin=req.headers.get('origin'),allowed=env.ALLOWED_ORIGIN;
@@ -27,6 +29,11 @@ export default {
    if(env.COOKIE_SECURE==='false'&&!['localhost','127.0.0.1','[::1]'].includes(url.hostname))throw new HttpError(503,'公開服務必須啟用安全 Cookie 設定');
    if(path==='/api/line/webhook'){
     try{return await webhook(req,env);}catch(e){if(e instanceof HttpError)return json({error:e.message,...(e.code?{code:e.code}:{})},e.status);return json({error:'暫時無法處理，請 LINE 重送'},500);}
+   }
+   if(path==='/api/binding/callback'){
+    if(req.method!=='GET')throw new HttpError(405,'只接受 GET');
+    if(url.origin!==allowed)throw new HttpError(403,'請從正式邀請網址開啟');
+    return await bindingCallback(req,env);
    }
    // 公開資訊不包含帳號、憑證或資料庫內容；用於預覽網址導回正式登入。
    if(path==='/api/public-info'&&req.method==='GET'){
@@ -42,6 +49,11 @@ export default {
    if(path==='/api/health'&&req.method==='GET')return json({ok:true,service:'辦公室小幫手 API'});
    let body:any;
    if(req.method==='POST'){let raw;try{raw=await limitedBody(req,100000);}catch{throw new HttpError(413,'請求過大');}try{body=JSON.parse(raw);}catch{throw new HttpError(400,'JSON 格式錯誤');}if(!body||typeof body!=='object'||Array.isArray(body))throw new HttpError(400,'請求格式錯誤');}
+   if(/^\/api\/binding\/(open|start|status|confirm)$/.test(path)){
+    if(req.method!=='POST')throw new HttpError(405,'只接受 POST');
+    if(url.origin!==allowed)throw new HttpError(403,'請從正式邀請網址開啟');
+    return await bindingPublic(req,env,path.split('/').at(-1)!,body);
+   }
    if(path==='/api/login'&&req.method==='POST'){
     const result=await login(req,env,body);headers.set('Set-Cookie',result.cookie);return json({actor:result.actor,csrf:result.csrf});
    }
@@ -78,7 +90,7 @@ export default {
    }
    if(path==='/api/data'&&req.method==='GET'){
     await recover(env.DB);
-    await env.DB.batch([env.DB.prepare('DELETE FROM reply_presence WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM undo_actions WHERE expires_at<?').bind(unix()-86400),env.DB.prepare('DELETE FROM pickup_item_undo WHERE expires_at<?').bind(unix()-600)]);
+    await env.DB.batch([env.DB.prepare('DELETE FROM binding_oauth WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM reply_presence WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM undo_actions WHERE expires_at<?').bind(unix()-86400),env.DB.prepare('DELETE FROM pickup_item_undo WHERE expires_at<?').bind(unix()-600)]);
     const version=(await env.DB.prepare('SELECT version FROM system_meta WHERE id=1').first<{version:number}>())!.version;
     const etag=`"${s.id}-${s.role}-${version}"`;headers.set('ETag',etag);
     if(req.headers.get('if-none-match')===etag)return new Response(null,{status:304,headers});
@@ -135,5 +147,5 @@ export default {
    return json({error:'操作失敗，請稍後重試或聯絡管理員',code:'INTERNAL_ERROR'},500);
   }
  },
- async scheduled(_event:ScheduledEvent,env:Env,ctx:ExecutionContext){ctx.waitUntil(env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM rate_limits WHERE expires_at<=?').bind(unix())]).then(()=>recover(env.DB)));}
+ async scheduled(_event:ScheduledEvent,env:Env,ctx:ExecutionContext){ctx.waitUntil(env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM rate_limits WHERE expires_at<=?').bind(unix()),env.DB.prepare('DELETE FROM binding_oauth WHERE expires_at<=?').bind(unix())]).then(()=>recover(env.DB)));}
 };

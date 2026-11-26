@@ -28,7 +28,7 @@ beforeAll(async()=>{
 afterAll(async()=>{await mf?.dispose();});
 beforeEach(async()=>{
  calls=[];lineStatus=200;lineThrows=false;botStatus=200;timeOffset=0;duringPush=undefined;
- for(const name of ['record_cleanup_jobs','undo_actions','reply_presence','conversation_views','handover_revisions','audit_logs','internal_notes','handovers','messages','conversations','notifications','pickup_item_undo','pickup_items','send_requests','unsend_tombstones','webhook_events','binding_codes','teachers','sessions','rate_limits','admins'])await db.prepare(`DELETE FROM ${name}`).run();
+ for(const name of ['binding_oauth','binding_invitations','record_cleanup_jobs','undo_actions','reply_presence','conversation_views','handover_revisions','audit_logs','internal_notes','handovers','messages','conversations','notifications','pickup_item_undo','pickup_items','send_requests','unsend_tombstones','webhook_events','binding_codes','teachers','sessions','rate_limits','admins'])await db.prepare(`DELETE FROM ${name}`).run();
  const hash=await passwordHash(credentials.password,authPepper);
  await db.prepare('INSERT INTO admins VALUES(?,?,?,?,?,?,?,?)').bind('test-admin',credentials.username,'測試管理員',hash,'admin',1,now(),now()).run();
  await db.prepare('INSERT INTO admins VALUES(?,?,?,?,?,?,?,?)').bind('test-staff',credentials.username+'-staff','測試行政人員',hash,'staff',1,now(),now()).run();

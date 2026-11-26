@@ -4,8 +4,10 @@ await build({entryPoints:['worker/index.ts'],bundle:true,format:'esm',platform:'
 writeFileSync('dist/_routes.json',JSON.stringify({version:1,include:['/api/*'],exclude:[]}));
 writeFileSync('dist/_headers',`/*
   X-Content-Type-Options: nosniff
-  Referrer-Policy: same-origin
+  Referrer-Policy: no-referrer
   X-Frame-Options: DENY
   Permissions-Policy: camera=(), microphone=(), geolocation=()
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+/bind
+  Cache-Control: no-store
 `);
